@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>kinetic-link-physics</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #1a1a1a; font-family: 'sans-serif'; user-select: none; }
+        canvas { display: block; cursor: crosshair; }
+        .ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+        .btn {
+            pointer-events: auto;
+            background: rgba(255,255,255,0.15);
+            border: 1px solid rgba(255,255,255,0.3);
+            padding: 8px 16px;
+            border-radius: 6px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.2s;
+            backdrop-filter: blur(4px);
+        }
+        .btn:hover { background: rgba(255,255,255,0.3); transform: translateY(-1px); }
+        
+        #menu-overlay {
+            position: absolute;
+            inset: 0;
+            background: rgba(0,0,0,0.85);
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+        }
+
+        #message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            display: none;
+            z-index: 40;
+        }
+    </style>
+</head>
+<body>
+
+<div class="ui-overlay">
+    <h1 class="text-2xl font-bold mb-1 tracking-tighter">kinetic-link-physics</h1>
+    <div id="status" class="text-sm opacity-80">STAGE: 1</div>
+    <div id="timer" class="text-sm opacity-80 font-mono">TIME: 00:00</div>
+    <div class="mt-4 flex gap-2">
+        <button class="btn text-xs" onclick="resetLevel()">RESET (R)</button>
+        <button class="btn text-xs" onclick="toggleMenu(true)">STAGE SELECT (ESC)</button>
+    </div>
+</div>
+
+<div id="menu-overlay">
+    <h2 class="text-4xl font-bold text-white mb-8">STAGE SELECT</h2>
+    <div id="stage-buttons" class="flex flex-wrap justify-center gap-4 max-w-md"></div>
+    <button class="mt-12 text-gray-400 hover:text-white" onclick="toggleMenu(false)">BACK TO GAME</button>
+</div>
+
+<div id="message">
+    <h2 id="msg-text" class="text-6xl font-bold text-yellow-400 mb-4 drop-shadow-lg">CLEAR!</h2>
+    <button class="btn text-xl px-12 py-4" onclick="nextLevel()">NEXT LEVEL</button>
+</div>
+
+<div class="absolute bottom-5 left-5 text-[10px] text-white/40 pointer-events-none">
+    WASD/Arrows: Move | R: Reset | ESC: Menu | Click: Transfer/Link
+</div>
+
+<script>
+    const { Engine, Render, Runner, World, Bodies, Body, Composite, Constraints, Events } = Matter;
+
+    const GRID_SIZE = 40;
+    const SHIFT_RANGE = 200;
+    const COLORS = {
+        PLAYER: '#fbbf24',
+        BLOCK: '#4b5563',
+        STICKABLE: '#f59e0b',
+        HAZARD: '#ef4444',
+        GOAL: '#22c55e',
+        STATIC: '#374151'
+    };
+
+    let engine, render, runner;
+    let playerBlocks = [];
+    let allBlocks = [];
+    let currentLevel = 0;
+    let startTime;
+    let isGameOver = false;
+    let isMenuOpen = false;
+
+    const LEVELS = [
+        {
+            blocks: [
+                { x: 150, y: 450, type: 'player' },
+                { x: 300, y: 500, type: 'stickable' },
+                { x: 700, y: 300, type: 'goal' },
+                { x: 400, y: 580, w: 800, h: 40, type: 'static' },
+                { x: 500, y: 450, w: 120, h: 20, type: 'static' }
+            ]
+        },
+        {
+            blocks: [
+                { x: 100, y: 500, type: 'player' },
+                { x: 250, y: 500, type: 'stickable' },
+                { x: 300, y: 500, type: 'stickable' },
+                { x: 500, y: 500, type: 'stickable' },
+                { x: 750, y: 200, type: 'goal' },
+                { x: 450, y: 590, w: 250, h: 40, type: 'hazard' },
+                { x: 150, y: 580, w: 350, h: 40, type: 'static' },
+                { x: 800, y: 580, w: 500, h: 40, type: 'static' }
+            ]
+        },
+        {
+            blocks: [
+                { x: 100, y: 100, type: 'player' },
+                { x: 100, y: 500, w: 200, h: 20, type: 'static' },
+                { x: 350, y: 400, type: 'stickable' },
+                { x: 600, y: 300, type: 'stickable' },
+                { x: 850, y: 200, type: 'goal' },
+                { x: 500, y: 650, w: 1500, h: 100, type: 'hazard' }
+            ]
+        }
+    ];
+
+    function init() {
+        engine = Engine.create();
+        render = Render.create({
+            element: document.body,
+            engine: engine,
+            options: {
+                width: window.innerWidth,
+                height: window.innerHeight,
+                wireframes: false,
+                background: '#0f172a'
+            }
+        });
+
+        runner = Runner.create();
+        Runner.run(runner, engine);
+        Render.run(render);
+
+        setupInteraction();
+        setupStageButtons();
+        setupVisuals();
+        loadLevel(currentLevel);
+        
+        startTime = Date.now();
+        animate();
+    }
+
+    function setupStageButtons() {
+        const container = document.getElementById('stage-buttons');
+        LEVELS.forEach((_, i) => {
+            const btn = document.createElement('button');
+            btn.className = 'btn w-16 h-16 text-xl font-bold';
+            btn.innerText = i + 1;
+            btn.onclick = () => {
+                loadLevel(i);
+                toggleMenu(false);
+            };
+            container.appendChild(btn);
+        });
+    }
+
+    function loadLevel(idx) {
+        if (idx >= LEVELS.length) {
+            document.getElementById('msg-text').innerText = "ALL STAGES CLEAR!";
+            document.getElementById('message').style.display = 'block';
+            return;
+        }
+
+        currentLevel = idx;
+        isGameOver = false;
+
+        // ワールドのクリーンアップ
+        World.clear(engine.world);
+        Engine.clear(engine);
+        
+        playerBlocks = [];
+        allBlocks = [];
+        document.getElementById('message').style.display = 'none';
+        document.getElementById('status').innerText = `STAGE: ${idx + 1}`;
+
+        const level = LEVELS[idx];
+        level.blocks.forEach(b => {
+            const w = b.w || GRID_SIZE;
+            const h = b.h || GRID_SIZE;
+            const options = {
+                friction: 0.1,
+                restitution: 0.1,
+                label: b.type,
+                render: { fillStyle: COLORS[b.type.toUpperCase()] }
+            };
+
+            if (b.type === 'static' || b.type === 'hazard' || b.type === 'goal') {
+                options.isStatic = true;
+            }
+
+            const body = Bodies.rectangle(b.x, b.y, w, h, options);
+            if (b.type === 'player') playerBlocks.push(body);
+            allBlocks.push(body);
+            World.add(engine.world, body);
+        });
+
+        setupCollision();
+    }
+
+    function setupInteraction() {
+        const keys = {};
+        window.addEventListener('keydown', (e) => {
+            keys[e.code] = true;
+            if (e.key.toLowerCase() === 'r') resetLevel();
+            if (e.key === 'Escape') toggleMenu(!isMenuOpen);
+        });
+        window.addEventListener('keyup', (e) => keys[e.code] = false);
+
+        Events.on(engine, 'beforeUpdate', () => {
+            if (isGameOver || isMenuOpen) return;
+            const speed = 0.005;
+            const jumpForce = 0.05;
+
+            playerBlocks.forEach(block => {
+                if (keys['ArrowRight'] || keys['KeyD']) Body.applyForce(block, block.position, { x: speed * block.mass, y: 0 });
+                if (keys['ArrowLeft'] || keys['KeyA']) Body.applyForce(block, block.position, { x: -speed * block.mass, y: 0 });
+            });
+
+            if ((keys['ArrowUp'] || keys['KeyW'] || keys['Space']) && canJump()) {
+                playerBlocks.forEach(block => {
+                    Body.applyForce(block, block.position, { x: 0, y: -jumpForce * block.mass });
+                });
+            }
+        });
+
+        window.onmousedown = (e) => {
+            if (isGameOver || isMenuOpen) return;
+            const mousePos = { x: e.clientX, y: e.clientY };
+            const clickedBody = allBlocks.find(b => {
+                const bounds = b.bounds;
+                return mousePos.x >= bounds.min.x && mousePos.x <= bounds.max.x &&
+                       mousePos.y >= bounds.min.y && mousePos.y <= bounds.max.y;
+            });
+            if (clickedBody && !playerBlocks.includes(clickedBody)) tryShift(clickedBody);
+        };
+    }
+
+    function setupVisuals() {
+        Events.on(render, 'afterRender', () => {
+            const ctx = render.context;
+            playerBlocks.forEach(body => {
+                const { x, y } = body.position;
+                const angle = body.angle;
+                ctx.save();
+                ctx.translate(x, y);
+                ctx.rotate(angle);
+                const eyeSpacing = 8;
+                const eyeY = -5;
+                const eyeSize = 4;
+                ctx.fillStyle = "white";
+                ctx.beginPath();
+                ctx.arc(-eyeSpacing, eyeY, eyeSize, 0, Math.PI * 2);
+                ctx.arc(eyeSpacing, eyeY, eyeSize, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = "black";
+                ctx.beginPath();
+                ctx.arc(-eyeSpacing, eyeY + 1, eyeSize/2, 0, Math.PI * 2);
+                ctx.arc(eyeSpacing, eyeY + 1, eyeSize/2, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
+            });
+        });
+    }
+
+    function tryShift(target) {
+        const inRange = playerBlocks.some(pb => Math.hypot(pb.position.x - target.position.x, pb.position.y - target.position.y) < SHIFT_RANGE);
+        if (!inRange) return;
+        if (target.label === 'stickable' || target.label === 'player') stickBlock(target);
+        else if (target.label === 'block') transferControl(target);
+    }
+
+    function stickBlock(newBlock) {
+        if (playerBlocks.includes(newBlock)) return;
+        newBlock.render.fillStyle = COLORS.PLAYER;
+        newBlock.label = 'player';
+        const closest = playerBlocks.reduce((prev, curr) => 
+            Math.hypot(prev.position.x - newBlock.position.x, prev.position.y - newBlock.position.y) < 
+            Math.hypot(curr.position.x - newBlock.position.x, curr.position.y - newBlock.position.y) ? prev : curr);
+
+        const constraint = Matter.Constraint.create({
+            bodyA: closest, bodyB: newBlock, stiffness: 0.8, length: Math.hypot(closest.position.x - newBlock.position.x, closest.position.y - newBlock.position.y), render: { visible: false }
+        });
+        World.add(engine.world, constraint);
+        playerBlocks.push(newBlock);
+    }
+
+    function transferControl(target) {
+        playerBlocks.forEach(pb => { pb.label = 'block'; pb.render.fillStyle = COLORS.BLOCK; });
+        const allConstraints = engine.world.constraints.filter(c => c.label !== 'mouseConstraint');
+        allConstraints.forEach(c => World.remove(engine.world, c));
+        target.label = 'player';
+        target.render.fillStyle = COLORS.PLAYER;
+        playerBlocks = [target];
+    }
+
+    function canJump() {
+        return playerBlocks.some(pb => Math.abs(pb.velocity.y) < 0.2);
+    }
+
+    function setupCollision() {
+        Events.on(engine, 'collisionStart', (event) => {
+            if (isGameOver) return;
+            event.pairs.forEach(pair => {
+                const labels = [pair.bodyA.label, pair.bodyB.label];
+                if (labels.includes('player') && labels.includes('goal')) win();
+                if (labels.includes('player') && labels.includes('hazard')) {
+                    isGameOver = true;
+                    // 重要: 物理更新ループの外でリセットを実行
+                    setTimeout(() => resetLevel(), 10);
+                }
+            });
+        });
+    }
+
+    function win() {
+        if (isGameOver) return;
+        isGameOver = true;
+        document.getElementById('msg-text').innerText = "CLEAR!";
+        document.getElementById('message').style.display = 'block';
+    }
+
+    function nextLevel() { loadLevel(currentLevel + 1); }
+    function resetLevel() { loadLevel(currentLevel); }
+    function toggleMenu(show) {
+        isMenuOpen = show;
+        document.getElementById('menu-overlay').style.display = show ? 'flex' : 'none';
+    }
+
+    function animate() {
+        if (!isGameOver && !isMenuOpen) {
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
+            const secs = String(elapsed % 60).padStart(2, '0');
+            document.getElementById('timer').innerText = `TIME: ${mins}:${secs}`;
+        }
+        requestAnimationFrame(animate);
+    }
+
+    window.addEventListener('resize', () => {
+        render.canvas.width = window.innerWidth;
+        render.canvas.height = window.innerHeight;
+    });
+
+    init();
+</script>
+</body>
+</html>
